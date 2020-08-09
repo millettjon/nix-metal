@@ -15,3 +15,7 @@
 (defn exists?
   [path]
   (-> path io/file .exists))
+
+(defn basename
+  [path]
+  (.getName (io/file (str path))))

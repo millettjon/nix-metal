@@ -2,10 +2,9 @@
   (:require [clojure.pprint :refer [pprint]]
             [clojure.java.io :as io]
             [cheshire.core :as json]
-            [jam.path :refer [exists? symlink? readlink]]
+            [jam.path :refer [exists? symlink? readlink basename]]
             [clojure.string :as str]
             [jam.sh :refer [$ $> die]]))
-
 
 (defn GiB
   "Converts GiB to bytes."
@@ -157,7 +156,7 @@
   "Identify disks and select partitioning scheme."
   [conf]
   (let [types (map disk-types (or (:disk-types conf) (keys disk-types)))
-        _ (pprint types)
+        #_#__ (pprint types)
         disks (->> (lsblk [:nodeps ; limit to top level devices
                            [:include (str/join "," types)]])
                    (filter #(>= (-> % :size)
@@ -206,23 +205,38 @@
     (when-not (empty? pools)
       (str/split-lines pools))))
 
+(defn destroy-pool
+  [pool]
+  ($ "zpool" "destroy" #_ "-f" pool))
+
 (defn destroy-pools
   []
   (doseq [pool (list-pools)]
-    ($ "zpool" "destroy" #_ "-f" pool)))
+    (destroy-pool pool)))
 
-(defn pool-block-devs
-  [])
+(defn pool-devs
+  "Returns the list of devices in a pool."
+  [pool]
+  (->> pool
+       ($> "zpool" "status" "-L")
+       str/split-lines
+       (map #(re-matches #"^\t +([^\s]+).*" %))
+       (filter identity)
+       (map second)))
+
+(defn pools-by-dev
+  "Returns a map of device to pool that is using it."
+  []
+  (reduce (fn [m pool]
+            (reduce (fn [m dev]
+                      (assoc m dev pool))
+                    m (pool-devs pool)))
+          {} (list-pools)))
 
 (defn stop-all
   "Stop all block devices."
   ([]
-   ;; TODO: only stop stuff in current set of disks
-   ;; -? why are pools being destroyed?
    (l "stopping block-devices")
-   ;; TODO: instead of destroying all pools here, figure out which ones on demand
-   ;; using zpool status
-   (destroy-pools)
    (stop-all (lsblk [:output-all [:include (str/join "," (vals disk-types))]])))
   ([devices]
    ;; Walk device tree. Stop children first then stop self.
@@ -232,9 +246,10 @@
      (stop-all children)
      ;; process self
      ;; Check for existence as device may have already been closed.
-     (l "stopping " path)
      (when (exists? path)
-       ;; TODO: Stop any zpools that us it first
+       ;; Stop any zpools that use it.
+       (when-let [pool (get (pools-by-dev) (basename (or (readlink path) path)))]
+         (destroy-pool pool))
        (l "stopping path" path)
        (case type
          "crypt" ($ "cryptsetup" "luksClose" path)
@@ -251,10 +266,10 @@
 
 (defn wipe-disks
   [{:keys [disks] :as conf}]
-  (stop-all)
   (doseq [disk disks]
     (let [dev (str "/dev/" disk)
           l  (partial l (str disk " - "))]
+      (stop-all (lsblk [:output-all] dev))
       (l "wiping paritions")
       ;; Note: It is important to wipe these right away. Otherwise, if
       ;; the kernel finds raid metadata it will and try and use the
@@ -488,11 +503,6 @@
                     :combine-fn f)]
     (run-handler conf)))
 
-#_ (defn create-zfs
-  [conf chain]
-  (pprint conf)
-  )
-
 (defn create-block-devices
   [{:keys [partitions] :as conf}]
   (doall
@@ -510,8 +520,14 @@
    :data {:partitions [[:zfs/data :luks]]}})
 
 (defn process
-  [conf]
-  (-> conf
+  [disks profile]
+  (println "==================================================")
+  (println "PROCESSING disks:" (pr-str disks) " using profile:" (pr-str profile))
+  (println "==================================================")
+
+  (-> profiles
+      profile
+      (assoc :disk-types disks)
       select-disks
       wipe-disks
       create-block-devices
@@ -519,23 +535,9 @@
 
 (defn -main
   []
-  #_(-> profiles
-        :main
-        (assoc :disk-types #{:nvme})
-        process)
-  (-> profiles
-      :data
-      (assoc :disk-types #{:sd})
-      process)
-  #_(-> profiles
-      :main
-      (assoc :disk-types #{:nvme})
-      select-disks
-      wipe-disks
-      create-block-devices
-      #_ pprint)
-
-)
+  ;; NEW LAPTOP
+  (process #{:nvme} :main)
+  (process #{:sd} :data))
 
 ;; TODO: need to add passphrase on luks key
 ;; TODO: leave some free space blocked in zfs
