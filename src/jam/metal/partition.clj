@@ -150,7 +150,7 @@
 
 (def disk-types
   {:hd "3"
-   :ssd "8"
+   :sd "8"
    :nvme "259"})
 
 (defn select-disks
@@ -211,12 +211,19 @@
   (doseq [pool (list-pools)]
     ($ "zpool" "destroy" #_ "-f" pool)))
 
+(defn pool-block-devs
+  [])
+
 (defn stop-all
   "Stop all block devices."
   ([]
+   ;; TODO: only stop stuff in current set of disks
+   ;; -? why are pools being destroyed?
    (l "stopping block-devices")
+   ;; TODO: instead of destroying all pools here, figure out which ones on demand
+   ;; using zpool status
    (destroy-pools)
-   (stop-all (lsblk [:output-all [:include "3,8"]])))
+   (stop-all (lsblk [:output-all [:include (str/join "," (vals disk-types))]])))
   ([devices]
    ;; Walk device tree. Stop children first then stop self.
    ;; hd(3), sd(8)
@@ -227,6 +234,8 @@
      ;; Check for existence as device may have already been closed.
      (l "stopping " path)
      (when (exists? path)
+       ;; TODO: Stop any zpools that us it first
+       (l "stopping path" path)
        (case type
          "crypt" ($ "cryptsetup" "luksClose" path)
          "raid1" (do
@@ -271,7 +280,7 @@
         n-arg (str "-n" part-num ":" start ":+" size)
         t-arg (str "-t" part-num ":" type)]
     ($ "sgdisk" n-arg t-arg disk)
-    ($> "partprobe")
+    ($> "partprobe" disk)
     (udev-settle)
     (wipe-dev part)
     part))
@@ -346,32 +355,40 @@
   []
   ($ "sysctl" "-w" "dev.raid.speed_limit_max=0"))
 
-;; :part/combine-fn
 (defmethod create-dev :md
   [{:keys [disks name size] :as conf}]
-  (raid-disable-recovery)
-  (let [f (fn [parts]
-            (let [dev   (str "/dev/md/" name)
-                  level (case (count parts)
-                          2 "1"
-                          4 "10")]
-              ($ ["mdadm" "--create" "--run" "--verbose"
-                   dev "--level" level
-                   "--raid-devices" (count parts)
-                   "--homehost=<none>"
-                   "--name" name]
-                  parts)
-                 dev))
-        conf (assoc conf
-                    :part/type "FD00" ; Linux RAID
-                    :combine-fn f)]
-    (run-handler conf)))
+  (if (< (count disks) 2)
+    (run-handler conf)
+    (let [_    (raid-disable-recovery)
+          f    (fn [parts]
+                 (let [dev   (str "/dev/md/" name)
+                       level (case (count parts)
+                               2 "1"
+                               4 "10")]
+                ($ ["mdadm" "--create" "--run" "--verbose"
+                    dev "--level" level
+                    "--raid-devices" (count parts)
+                    "--homehost=<none>"
+                    "--name" name]
+                   parts)
+                dev))
+          conf (assoc conf
+                      :part/type "FD00" ; Linux RAID
+                      :combine-fn f)]
+      (run-handler conf))))
+
+(defn luks-create
+  [file]
+  (when-not (exists? file)
+    (l ":luks creating key")
+    ($ "dd" "bs=512" "count=4" "if=/dev/random" (str "of=" file) "iflag=fullblock"))
+  file)
 
 (defmethod create-dev :luks
   [{:keys [size disks] :as conf}]
   (let [f    (fn [part]
                ;; /dev/mapper/NAME must be unique
-               (let [key-file "/root/luks.key"
+               (let [key-file (luks-create "/root/luks.key")
                      name     ($> "basename" part)]
               ($ "cryptsetup" "--batch-mode" "luksFormat" part key-file)
               ($ "cryptsetup" "luksOpen" part name "--key-file" key-file)
@@ -405,6 +422,12 @@
    "-O" "xattr=sa"
    ])
 
+(defn pool
+  [name parts]
+  (if (> 1 (count parts))
+    [name "mirror"]
+    name))
+
 (defmethod create-dev :zfs/boot
   [conf]
   (let [f (fn [parts]
@@ -412,7 +435,7 @@
                zfs-bpool-options
                "-O" "mountpoint=/boot"
                "-R" "/mnt"
-               "bpool" "mirror"
+               (pool "bpool" parts)
                parts)
             "bpool")
         conf (assoc conf
@@ -440,9 +463,25 @@
                zfs-rpool-options
                "-O" "mountpoint=/"
                "-R" "/mnt"
-               "rpool" "mirror"
+               (pool "rpool" parts)
                parts)
             "rpool")
+        conf (assoc conf
+                    :part/size 0      ; all available space
+                    :part/type "BF00" ; Solaris root
+                    :combine-fn f)]
+    (run-handler conf)))
+
+(defmethod create-dev :zfs/data
+  [conf]
+  (let [f (fn [parts]
+            ($ "zpool" "create"
+               zfs-rpool-options
+               "-O" "mountpoint=/data"
+               "-R" "/mnt"
+               (pool "dpool" parts)
+               parts)
+            "dpool")
         conf (assoc conf
                     :part/size 0      ; all available space
                     :part/type "BF00" ; Solaris root
@@ -463,23 +502,45 @@
           (println "==================================================")
           (create-dev (assoc conf :chain chain))) partitions)))
 
-(defn -main
-  []
-  (-> {:disk-types #{:nvme}
-       :partitions [
-                    [:esp]
-                    [:swap :luks :md]
-                    [:zfs/boot]
-                    [:zfs/root :luks]
-                    ]}
+(def profiles
+  {:main {:partitions [[:esp]
+                       [:swap :luks :md]
+                       [:zfs/boot]
+                       [:zfs/root :luks]]}
+   :data {:partitions [[:zfs/data :luks]]}})
+
+(defn process
+  [conf]
+  (-> conf
       select-disks
       wipe-disks
       create-block-devices
-      #_ pprint))
+      pprint))
 
-;; put in protection to not raid if only 1 device.
-;; error - partprobe is error when messing with the usbstick WTF
-;;   - happens after running nvme partitioning
+(defn -main
+  []
+  #_(-> profiles
+        :main
+        (assoc :disk-types #{:nvme})
+        process)
+  (-> profiles
+      :data
+      (assoc :disk-types #{:sd})
+      process)
+  #_(-> profiles
+      :main
+      (assoc :disk-types #{:nvme})
+      select-disks
+      wipe-disks
+      create-block-devices
+      #_ pprint)
+
+)
+
+;; TODO: need to add passphrase on luks key
+;; TODO: leave some free space blocked in zfs
+;; WARNING: Locking directory /run/cryptsetup is missing!
+;; fix zfs to not mirror when there is 1 device
 ;; add profile for data pool
 
 ;; partition mode
