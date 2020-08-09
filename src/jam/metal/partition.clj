@@ -54,20 +54,7 @@
   (str "--" (name opt)))
 
 
-;; "blockdevices": [
-;;                  {"name":"loop0", "maj:min":"7:0", "rm":false, "size":1212456960, "ro":true, "type":"loop", "mountpoint":"/nix/.ro-store"},
-;;                  {"name":"sda", "maj:min":"8:0", "rm":false, "size":1000204886016, "ro":false, "type":"disk", "mountpoint":null},
-;;                  {"name":"sdb", "maj:min":"8:16", "rm":true, "size":31142707200, "ro":true, "type":"disk", "mountpoint":null},
-;;                  {"name":"nvme0n1", "maj:min":"259:0", "rm":false, "size":128035676160, "ro":false, "type":"disk", "mountpoint":null}
-;;                  ]
-
-;; internal scsc hdd 8:0
-;; usbstick 8:16
-;; nvme 259:0
-;; ? why does usb show up a?
-
-;; Getting the model is useful:
-;; - ? make sure model matches?
+;; Getting the model may be useful.
 ;; lsblk -io NAME,TYPE,SIZE,MOUNTPOINT,FSTYPE,MODEL,HOTPLUG
 ;; lsblk --help to list all options
 
@@ -141,7 +128,9 @@
   (let [kiB      (:MemTotal (meminfo))
         MiB      (/ kiB 1024)]
     ;; Use 1/8 of total memory.
-    (-> MiB (/ 8) long)))
+    ;;(-> MiB (/ 8) long)
+    (-> MiB (/ 1) long)
+    ))
 
 (defn l
   [& args]
@@ -240,11 +229,10 @@
    (stop-all (lsblk [:output-all [:include (str/join "," (vals disk-types))]])))
   ([devices]
    ;; Walk device tree. Stop children first then stop self.
-   ;; hd(3), sd(8)
    (when-let [{:keys [path type children]} (first devices)]
-     ;; process children
+     ;; Process children.
      (stop-all children)
-     ;; process self
+     ;; Process self.
      ;; Check for existence as device may have already been closed.
      (when (exists? path)
        ;; Stop any zpools that use it.
@@ -361,7 +349,7 @@
                     :size size
                     :part/size (/ size (count disks))
                     :part/type "8200" ; Linux Swap
-                    :setup-fn #($ "mkswap" %))]
+                    :setup-fn #($ "mkswap" "-L" "swap" %))]
     (run-handler conf)))
 
 (defn raid-disable-recovery
@@ -373,7 +361,9 @@
 (defmethod create-dev :md
   [{:keys [disks name size] :as conf}]
   (if (< (count disks) 2)
-    (run-handler conf)
+    (do
+      (l :md " skipping raid setup since only 1 device")
+      (run-handler conf))
     (let [_    (raid-disable-recovery)
           f    (fn [parts]
                  (let [dev   (str "/dev/md/" name)
@@ -471,37 +461,30 @@
    "-O" "relatime=on"
    "-O" "xattr=sa"])
 
-(defmethod create-dev :zfs/root
-  [conf]
+(defn create-pool-whole-disk
+  "Creates a zpool using all available data on a device."
+  [conf name mountpoint]
   (let [f (fn [parts]
             ($ "zpool" "create"
                zfs-rpool-options
-               "-O" "mountpoint=/"
+               "-O" (str "mountpoint=" mountpoint)
                "-R" "/mnt"
-               (pool "rpool" parts)
+               (pool name parts)
                parts)
-            "rpool")
+            name)
         conf (assoc conf
                     :part/size 0      ; all available space
                     :part/type "BF00" ; Solaris root
                     :combine-fn f)]
     (run-handler conf)))
 
+(defmethod create-dev :zfs/root
+  [conf]
+  (create-pool-whole-disk conf "rpool" "/"))
+
 (defmethod create-dev :zfs/data
   [conf]
-  (let [f (fn [parts]
-            ($ "zpool" "create"
-               zfs-rpool-options
-               "-O" "mountpoint=/data"
-               "-R" "/mnt"
-               (pool "dpool" parts)
-               parts)
-            "dpool")
-        conf (assoc conf
-                    :part/size 0      ; all available space
-                    :part/type "BF00" ; Solaris root
-                    :combine-fn f)]
-    (run-handler conf)))
+  (create-pool-whole-disk conf "dpool" "/data"))
 
 (defn create-block-devices
   [{:keys [partitions] :as conf}]
@@ -538,18 +521,6 @@
   ;; NEW LAPTOP
   (process #{:nvme} :main)
   (process #{:sd} :data))
-
-;; TODO: need to add passphrase on luks key
-;; TODO: leave some free space blocked in zfs
-;; WARNING: Locking directory /run/cryptsetup is missing!
-;; fix zfs to not mirror when there is 1 device
-;; add profile for data pool
-
-;; partition mode
-;; - equal size devices 1,2,4
-;; - unequal size e.g., nvme + hdd
-;;   - put everything on fastest drive (what is min size)
-;;   - setup other drive for data/backup
 
 ;; Delete all partitions.
 ;; ($ "partx" "--delete" dev)
