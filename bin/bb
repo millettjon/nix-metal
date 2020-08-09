@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -e
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+
+export BABASHKA_CLASSPATH=src
+
+NS="$(basename "$0")"
+NS="${NS//\//.}"
+
+exec .cache/bb --main "$NS" "$@"

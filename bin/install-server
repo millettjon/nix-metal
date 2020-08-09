@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+# This script is intended to setup a new server via ssh into an rescue image.
+
+# Safety goggles.
+set -e
+
+# Change to the project root directory.
+PROJECT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+export PROJECT_HOME
+cd "$PROJECT_HOME"
+
+NAME=$(basename "$0")
+
+function usage() {
+    local message="$1"
+    cat <<EOF
+ERROR: ${message}
+
+USAGE:
+${NAME} [USER@]HOST [PORT]
+
+EXAMPLE:
+${NAME} root@127.0.0.1 2222
+
+EOF
+    exit 1
+}
+
+# Validate command line.
+(( $# < 1 )) && usage "host required"
+(( $# > 2 )) && usage "too many arguments"
+
+HOST="$1"
+PORT="${2:-22}"
+
+#  -e "ssh -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+rsync -av \
+      "${PROJECT_HOME}" \
+      "${HOST}:/root"
+
+# false &&
+# scp -P $PORT \
+#     -o StrictHostKeyChecking=no \
+#     -o UserKnownHostsFile=/dev/null \
+#     var/luks.key $HOST:
+
+# false &&
+# cat bin/install-{babashka,nixos} |
+#     ssh -q \
+#         -o StrictHostKeyChecking=no \
+#         -o UserKnownHostsFile=/dev/null \
+#         -p$PORT \
+#         $HOST \
+#         bash -s

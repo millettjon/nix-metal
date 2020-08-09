@@ -1,0 +1,47 @@
+Setup test environment to replicate nixos install from OVH rescue CD.
+
+Use qemu to boot into rescuecd distro.
+- https://www.system-rescue-cd.org/
+
+SUMMARY
+Install nixos on a bare metal system.
+
+TASKS
+- use tmp/ instead of var/
+- get running locally
+- factor out into namespaces
+- add partitioning configuration suitable for laptop
+  -? how does it get configuration?
+    -? auto detect?
+- launch nix installer
+  -? how does it get configuration?
+
+QUESTIONS
+- ? what would final process look like?
+  ssh newbox
+  git clone ... (or scp -r from local box)
+  bin/install
+- ? how does luks password get managed?
+- ? luks key should be generated on device? (is this too slow in vm?)
+
+ARCHITECTURE
+- assumes system is:
+  - booted using rescue cd
+  - can be connected to via ssh (or console)
+  - has network access to download
+
+GOALS
+- should work on servers
+- should work on laptops
+- should handle partitioning
+- should handle zfs
+- should handle raid
+- should handle zfs & raid
+- should handle swap
+- should have some auto detection capability
+- should handle full disk encryption (LUKS)
+
+NICE TO HAVE
+- for servers: dropbear ssh in initrd for remote unlock
+- for laptops: unlock w/ secure password at boot
+- for laptops: unlock w/ security toke at boot
