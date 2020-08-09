@@ -2,7 +2,8 @@
   (:require [clojure.pprint :refer [pprint]]
             [clojure.java.io :as io]
             [cheshire.core :as json]
-            [jam.path :refer [exists?]]
+            [jam.path :refer [exists? symlink? readlink]]
+            [clojure.string :as str]
             [jam.sh :refer [$ $> die]]))
 
 
@@ -53,6 +54,24 @@
   [opt]
   (str "--" (name opt)))
 
+
+;; "blockdevices": [
+;;                  {"name":"loop0", "maj:min":"7:0", "rm":false, "size":1212456960, "ro":true, "type":"loop", "mountpoint":"/nix/.ro-store"},
+;;                  {"name":"sda", "maj:min":"8:0", "rm":false, "size":1000204886016, "ro":false, "type":"disk", "mountpoint":null},
+;;                  {"name":"sdb", "maj:min":"8:16", "rm":true, "size":31142707200, "ro":true, "type":"disk", "mountpoint":null},
+;;                  {"name":"nvme0n1", "maj:min":"259:0", "rm":false, "size":128035676160, "ro":false, "type":"disk", "mountpoint":null}
+;;                  ]
+
+;; internal scsc hdd 8:0
+;; usbstick 8:16
+;; nvme 259:0
+;; ? why does usb show up a?
+
+;; Getting the model is useful:
+;; - ? make sure model matches?
+;; lsblk -io NAME,TYPE,SIZE,MOUNTPOINT,FSTYPE,MODEL,HOTPLUG
+;; lsblk --help to list all options
+
 (defn lsblk
   "Returns information about attached block devices.
   See: https://www.kernel.org/doc/Documentation/admin-guide/devices.txt"
@@ -61,23 +80,25 @@
   ([arg]
    (cond (string? arg) (lsblk [] arg)
          (coll? arg)   (lsblk arg nil)
-         :else (die "Unexpected argument to lsblk:" arg)))
+         :else         (die "Unexpected argument to lsblk:" arg)))
   ([opts device & devices]
-   (let [cmd ["lsblk" "--json" "--bytes"]
+   (let [cmd   ["lsblk" "--json" "--bytes"]
          ;; add flags and options to argument list
-         cmd (reduce (fn [v opt]
-                       (let [args (if (coll? opt)
-                                    [(kw->option (first opt)) (second opt)]
-                                    [(kw->option opt)])]
+         cmd   (reduce (fn [v opt]
+                         (let [args (if (coll? opt)
+                                      [(kw->option (first opt)) (second opt)]
+                                      [(kw->option opt)])]
                          (concat v args)))
                      cmd
                      opts)
-         cmd (if device
+         cmd   (if device
                (concat cmd [device] devices)
                (concat cmd devices))
          disks (-> (apply $> cmd)
                    (json/parse-string true)
-                   :blockdevices)]
+                   :blockdevices)
+         ;; filter out removeable disks e.g., usb sticks
+         disks (remove :rm disks)]
      ;; split :maj:min column into :maj and :min
      (reduce (fn [disks disk]
                (let [[maj min] (-> :maj:min disk (str/split #":"))
@@ -127,14 +148,21 @@
   [& args]
   (println "----" (apply str args) "----"))
 
+(def disk-types
+  {:hd "3"
+   :ssd "8"
+   :nvme "259"})
+
 (defn select-disks
   "Identify disks and select partitioning scheme."
   [conf]
-  (let [disks (->> (lsblk [:nodeps ; limit to top level devices
-                           [:include "3,8"] ; hd(3), sd(8)
-                           ])
+  (let [types (map disk-types (or (:disk-types conf) (keys disk-types)))
+        _ (pprint types)
+        disks (->> (lsblk [:nodeps ; limit to top level devices
+                           [:include (str/join "," types)]])
                    (filter #(>= (-> % :size)
                                 (-> CONF :disk :min-size))))]
+    (pprint disks)
     (and (empty? disks)
          (die "No suitables disks found."))
     (or (get-in CONF [:disk :groups (count disks)])
@@ -435,16 +463,30 @@
           (println "==================================================")
           (create-dev (assoc conf :chain chain))) partitions)))
 
-(-> {:partitions [
-                  [:esp]
-                  [:swap :luks :md]
-                  [:zfs/boot]
-                  [:zfs/root :luks]
-                  ]}
-    select-disks
-    wipe-disks
-    create-block-devices
-    pprint)
+(defn -main
+  []
+  (-> {:disk-types #{:nvme}
+       :partitions [
+                    [:esp]
+                    [:swap :luks :md]
+                    [:zfs/boot]
+                    [:zfs/root :luks]
+                    ]}
+      select-disks
+      wipe-disks
+      create-block-devices
+      #_ pprint))
+
+;; put in protection to not raid if only 1 device.
+;; error - partprobe is error when messing with the usbstick WTF
+;;   - happens after running nvme partitioning
+;; add profile for data pool
+
+;; partition mode
+;; - equal size devices 1,2,4
+;; - unequal size e.g., nvme + hdd
+;;   - put everything on fastest drive (what is min size)
+;;   - setup other drive for data/backup
 
 ;; Delete all partitions.
 ;; ($ "partx" "--delete" dev)

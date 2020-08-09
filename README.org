@@ -1,3 +1,17 @@
+INSTALL
+ssh to server
+git clone git@git.millett.net:nix-metal
+
+# dev setup
+git clone https://github.com/bbatsov/prelude.git .emacs.d
+rsync -avL ~/.emacs.d/personal root@192.168.1.10:.emacs.d
+nix-shell
+emacs
+
+- tries to use usb stick
+- fails to recongize nvme device
+
+
 Setup test environment to replicate nixos install from OVH rescue CD.
 
 Use qemu to boot into rescuecd distro.
