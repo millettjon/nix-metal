@@ -438,13 +438,33 @@
 (-> {:partitions [
                   [:esp]
                   [:swap :luks :md]
-                  [:zfs/boot]
+                  #_ [:zfs/boot]
                   [:zfs/root :luks]
                   ]}
     select-disks
     wipe-disks
     create-block-devices
     pprint)
+
+;; TODO select #{:nvme}
+;; TODO select #{:hdd}
+;; TODO collect info to pass along to next stage
+
+;; References:
+;; - https://openzfs.github.io/openzfs-docs/Getting%20Started/Ubuntu/Ubuntu%2020.04%20Root%20on%20ZFS.html#
+;; - https://nixos.wiki/wiki/NixOS_on_ZFS#Encrypted_ZFS
+;; - https://elvishjerricco.github.io/2018/12/06/encrypted-boot-on-zfs-with-nixos.html
+;;
+;; Decisions:
+;; - swap is not stable on zfs
+;; - leave boot unencrypted
+;;   - luks2 doesn't work w/ encrypted boot
+;; - use luks for encryption since it doesn't leak meta data
+;;
+;; Todo:
+;; - add data pool on hdd
+;; - blog post
+
 
 ;; Delete all partitions.
 ;; ($ "partx" "--delete" dev)
