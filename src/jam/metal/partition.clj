@@ -2,9 +2,9 @@
   (:require [clojure.pprint :refer [pprint]]
             [clojure.java.io :as io]
             [cheshire.core :as json]
-            [jam.path :refer [exists?]]
+            [jam.path :refer [exists? symlink? readlink basename]]
+            [clojure.string :as str]
             [jam.sh :refer [$ $> die]]))
-
 
 (defn GiB
   "Converts GiB to bytes."
@@ -53,6 +53,11 @@
   [opt]
   (str "--" (name opt)))
 
+
+;; Getting the model may be useful.
+;; lsblk -io NAME,TYPE,SIZE,MOUNTPOINT,FSTYPE,MODEL,HOTPLUG
+;; lsblk --help to list all options
+
 (defn lsblk
   "Returns information about attached block devices.
   See: https://www.kernel.org/doc/Documentation/admin-guide/devices.txt"
@@ -61,23 +66,25 @@
   ([arg]
    (cond (string? arg) (lsblk [] arg)
          (coll? arg)   (lsblk arg nil)
-         :else (die "Unexpected argument to lsblk:" arg)))
+         :else         (die "Unexpected argument to lsblk:" arg)))
   ([opts device & devices]
-   (let [cmd ["lsblk" "--json" "--bytes"]
+   (let [cmd   ["lsblk" "--json" "--bytes"]
          ;; add flags and options to argument list
-         cmd (reduce (fn [v opt]
-                       (let [args (if (coll? opt)
-                                    [(kw->option (first opt)) (second opt)]
-                                    [(kw->option opt)])]
+         cmd   (reduce (fn [v opt]
+                         (let [args (if (coll? opt)
+                                      [(kw->option (first opt)) (second opt)]
+                                      [(kw->option opt)])]
                          (concat v args)))
                      cmd
                      opts)
-         cmd (if device
+         cmd   (if device
                (concat cmd [device] devices)
                (concat cmd devices))
          disks (-> (apply $> cmd)
                    (json/parse-string true)
-                   :blockdevices)]
+                   :blockdevices)
+         ;; filter out removeable disks e.g., usb sticks
+         disks (remove :rm disks)]
      ;; split :maj:min column into :maj and :min
      (reduce (fn [disks disk]
                (let [[maj min] (-> :maj:min disk (str/split #":"))
@@ -121,20 +128,29 @@
   (let [kiB      (:MemTotal (meminfo))
         MiB      (/ kiB 1024)]
     ;; Use 1/8 of total memory.
-    (-> MiB (/ 8) long)))
+    ;;(-> MiB (/ 8) long)
+    (-> MiB (/ 1) long)
+    ))
 
 (defn l
   [& args]
   (println "----" (apply str args) "----"))
 
+(def disk-types
+  {:hd "3"
+   :sd "8"
+   :nvme "259"})
+
 (defn select-disks
   "Identify disks and select partitioning scheme."
   [conf]
-  (let [disks (->> (lsblk [:nodeps ; limit to top level devices
-                           [:include "3,8"] ; hd(3), sd(8)
-                           ])
+  (let [types (map disk-types (or (:disk-types conf) (keys disk-types)))
+        #_#__ (pprint types)
+        disks (->> (lsblk [:nodeps ; limit to top level devices
+                           [:include (str/join "," types)]])
                    (filter #(>= (-> % :size)
                                 (-> CONF :disk :min-size))))]
+    (pprint disks)
     (and (empty? disks)
          (die "No suitables disks found."))
     (or (get-in CONF [:disk :groups (count disks)])
@@ -178,27 +194,51 @@
     (when-not (empty? pools)
       (str/split-lines pools))))
 
+(defn destroy-pool
+  [pool]
+  ($ "zpool" "destroy" #_ "-f" pool))
+
 (defn destroy-pools
   []
   (doseq [pool (list-pools)]
-    ($ "zpool" "destroy" #_ "-f" pool)))
+    (destroy-pool pool)))
+
+(defn pool-devs
+  "Returns the list of devices in a pool."
+  [pool]
+  (->> pool
+       ($> "zpool" "status" "-L")
+       str/split-lines
+       (map #(re-matches #"^\t +([^\s]+).*" %))
+       (filter identity)
+       (map second)))
+
+(defn pools-by-dev
+  "Returns a map of device to pool that is using it."
+  []
+  (reduce (fn [m pool]
+            (reduce (fn [m dev]
+                      (assoc m dev pool))
+                    m (pool-devs pool)))
+          {} (list-pools)))
 
 (defn stop-all
   "Stop all block devices."
   ([]
    (l "stopping block-devices")
-   (destroy-pools)
-   (stop-all (lsblk [:output-all [:include "3,8"]])))
+   (stop-all (lsblk [:output-all [:include (str/join "," (vals disk-types))]])))
   ([devices]
    ;; Walk device tree. Stop children first then stop self.
-   ;; hd(3), sd(8)
    (when-let [{:keys [path type children]} (first devices)]
-     ;; process children
+     ;; Process children.
      (stop-all children)
-     ;; process self
+     ;; Process self.
      ;; Check for existence as device may have already been closed.
-     (l "stopping " path)
      (when (exists? path)
+       ;; Stop any zpools that use it.
+       (when-let [pool (get (pools-by-dev) (basename (or (readlink path) path)))]
+         (destroy-pool pool))
+       (l "stopping path" path)
        (case type
          "crypt" ($ "cryptsetup" "luksClose" path)
          "raid1" (do
@@ -214,10 +254,10 @@
 
 (defn wipe-disks
   [{:keys [disks] :as conf}]
-  (stop-all)
   (doseq [disk disks]
     (let [dev (str "/dev/" disk)
           l  (partial l (str disk " - "))]
+      (stop-all (lsblk [:output-all] dev))
       (l "wiping paritions")
       ;; Note: It is important to wipe these right away. Otherwise, if
       ;; the kernel finds raid metadata it will and try and use the
@@ -243,7 +283,7 @@
         n-arg (str "-n" part-num ":" start ":+" size)
         t-arg (str "-t" part-num ":" type)]
     ($ "sgdisk" n-arg t-arg disk)
-    ($> "partprobe")
+    ($> "partprobe" disk)
     (udev-settle)
     (wipe-dev part)
     part))
@@ -309,7 +349,7 @@
                     :size size
                     :part/size (/ size (count disks))
                     :part/type "8200" ; Linux Swap
-                    :setup-fn #($ "mkswap" %))]
+                    :setup-fn #($ "mkswap" "-L" "swap" %))]
     (run-handler conf)))
 
 (defn raid-disable-recovery
@@ -318,32 +358,42 @@
   []
   ($ "sysctl" "-w" "dev.raid.speed_limit_max=0"))
 
-;; :part/combine-fn
 (defmethod create-dev :md
   [{:keys [disks name size] :as conf}]
-  (raid-disable-recovery)
-  (let [f (fn [parts]
-            (let [dev   (str "/dev/md/" name)
-                  level (case (count parts)
-                          2 "1"
-                          4 "10")]
-              ($ ["mdadm" "--create" "--run" "--verbose"
-                   dev "--level" level
-                   "--raid-devices" (count parts)
-                   "--homehost=<none>"
-                   "--name" name]
-                  parts)
-                 dev))
-        conf (assoc conf
-                    :part/type "FD00" ; Linux RAID
-                    :combine-fn f)]
-    (run-handler conf)))
+  (if (< (count disks) 2)
+    (do
+      (l :md " skipping raid setup since only 1 device")
+      (run-handler conf))
+    (let [_    (raid-disable-recovery)
+          f    (fn [parts]
+                 (let [dev   (str "/dev/md/" name)
+                       level (case (count parts)
+                               2 "1"
+                               4 "10")]
+                ($ ["mdadm" "--create" "--run" "--verbose"
+                    dev "--level" level
+                    "--raid-devices" (count parts)
+                    "--homehost=<none>"
+                    "--name" name]
+                   parts)
+                dev))
+          conf (assoc conf
+                      :part/type "FD00" ; Linux RAID
+                      :combine-fn f)]
+      (run-handler conf))))
+
+(defn luks-create
+  [file]
+  (when-not (exists? file)
+    (l ":luks creating key")
+    ($ "dd" "bs=512" "count=4" "if=/dev/random" (str "of=" file) "iflag=fullblock"))
+  file)
 
 (defmethod create-dev :luks
   [{:keys [size disks] :as conf}]
   (let [f    (fn [part]
                ;; /dev/mapper/NAME must be unique
-               (let [key-file "/root/luks.key"
+               (let [key-file (luks-create "/root/luks.key")
                      name     ($> "basename" part)]
               ($ "cryptsetup" "--batch-mode" "luksFormat" part key-file)
               ($ "cryptsetup" "luksOpen" part name "--key-file" key-file)
@@ -353,78 +403,47 @@
                     :map-fn f)]
     (run-handler conf)))
 
-;; Ref: https://openzfs.github.io/openzfs-docs/Getting%20Started/Ubuntu/Ubuntu%2020.04%20Root%20on%20ZFS.html
-(def zfs-bpool-options
-  ["-o" "ashift=12"
-   "-o" "feature@async_destroy=enabled"
-   "-o" "feature@bookmarks=enabled"
-   "-o" "feature@embedded_data=enabled"
-   "-o" "feature@empty_bpobj=enabled"
-   "-o" "feature@enabled_txg=enabled"
-   "-o" "feature@extensible_dataset=enabled"
-   "-o" "feature@filesystem_limits=enabled"
-   "-o" "feature@hole_birth=enabled"
-   "-o" "feature@large_blocks=enabled"
-   "-o" "feature@lz4_compress=enabled"
-   "-o" "feature@spacemap_histogram=enabled"
-   "-o" "feature@zpool_checkpoint=enabled"
-   "-O" "acltype=posixacl"
-   "-O" "canmount=off"
-   "-O" "compression=lz4"
-   "-O" "devices=off"
-   "-O" "normalization=formD"
-   "-O" "relatime=on"
-   "-O" "xattr=sa"
-   ])
-
-(defmethod create-dev :zfs/boot
-  [conf]
-  (let [f (fn [parts]
-            ($ "zpool" "create"
-               zfs-bpool-options
-               "-O" "mountpoint=/boot"
-               "-R" "/mnt"
-               "bpool" "mirror"
-               parts)
-            "bpool")
-        conf (assoc conf
-                    :part/size 500
-                    :part/type "BE00" ; Solaris boot
-                    :combine-fn f)]
-    (run-handler conf)))
-
+(defn pool
+  [name parts]
+  (if (> 1 (count parts))
+    [name "mirror"]
+    name))
 
 ;; Ref: https://openzfs.github.io/openzfs-docs/Getting%20Started/Ubuntu/Ubuntu%2020.04%20Root%20on%20ZFS.html
 (def zfs-rpool-options
-  ["-o" "ashift=12"
-   "-O" "acltype=posixacl"
-   "-O" "canmount=off"
-   "-O" "compression=lz4"
-   "-O" "dnodesize=auto"
-   "-O" "normalization=formD"
-   "-O" "relatime=on"
-   "-O" "xattr=sa"])
+  ["-o" "ashift=12"           ; ok
+   "-O" "acltype=posixacl"    ; ok, for journald
+   "-O" "compression=lz4"     ; ok,
+   "-O" "xattr=sa"            ; ok, for journald
+   "-O" "mountpoint=none"     ; ok
+   "-O" "atime=off"           ; ok, better performance
+   ])
 
-(defmethod create-dev :zfs/root
-  [conf]
+(defn create-pool-whole-disk
+  "Creates a zfs pool using all available data on a device."
+  [conf name]
   (let [f (fn [parts]
             ($ "zpool" "create"
                zfs-rpool-options
-               "-O" "mountpoint=/"
-               "-R" "/mnt"
-               "rpool" "mirror"
+               (pool name parts)
                parts)
-            "rpool")
+            name)
         conf (assoc conf
                     :part/size 0      ; all available space
                     :part/type "BF00" ; Solaris root
                     :combine-fn f)]
     (run-handler conf)))
 
-#_ (defn create-zfs
-  [conf chain]
-  (pprint conf)
-  )
+;; TODO: -? does zfs create ... need to be called? (creates a new filesystem)
+;; TODO: what datasets to create?
+
+(defmethod create-dev :zfs/root
+  [conf]
+  (create-pool-whole-disk conf "root_pool"))
+
+(defmethod create-dev :zfs/data
+  [conf]
+  (create-pool-whole-disk conf "data_pool"))
 
 (defn create-block-devices
   [{:keys [partitions] :as conf}]
@@ -435,16 +454,49 @@
           (println "==================================================")
           (create-dev (assoc conf :chain chain))) partitions)))
 
-(-> {:partitions [
-                  [:esp]
-                  [:swap :luks :md]
-                  #_ [:zfs/boot]
-                  [:zfs/root :luks]
-                  ]}
-    select-disks
-    wipe-disks
-    create-block-devices
-    pprint)
+(def profiles
+  {:main {:partitions [[:esp]
+                       [:swap :luks :md]
+                       [:zfs/root :luks]]}
+   :data {:partitions [[:zfs/data :luks]]}})
+
+;; need to fix multi method dispatch
+[:zfs :root_pool [:root]]
+
+;; ? how to add data sets?
+;; - those need to be:
+;;   - created
+;;   - mounted before install
+
+;; ? how to mount?
+
+;; ? is this better done by fn calls?
+(def profiles
+  {:main {:partitions [[:esp]
+                       [:swap :luks :md]
+                       [:zfs/root :luks]]}
+   :data {:partitions [[:zfs/data :luks]]}})
+
+
+(defn process
+  [disks profile]
+  (println "==================================================")
+  (println "PROCESSING disks:" (pr-str disks) " using profile:" (pr-str profile))
+  (println "==================================================")
+
+  (-> profiles
+      profile
+      (assoc :disk-types disks)
+      select-disks
+      wipe-disks
+      create-block-devices
+      pprint))
+
+(defn -main
+  []
+  ;; NEW LAPTOP
+  (process #{:nvme} :main)
+  (process #{:sd} :data))
 
 ;; TODO select #{:nvme}
 ;; TODO select #{:hdd}

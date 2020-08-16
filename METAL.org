@@ -1,3 +1,54 @@
+INSTALL
+# (steps for metal at home)
+- boot w/ graphical installer
+- connect networking
+- start ssh daemon
+$ systemctl start sshd
+- ssh to server
+- clone repo
+$ git clone git@git.millett.net:nix-metal
+
+# (steps for dev setup if needed)
+git clone https://github.com/bbatsov/prelude.git .emacs.d
+rsync -avL ~/.emacs.d/personal root@192.168.1.10:.emacs.d
+nix-shell
+emacs
+
+2.3 Installing
+# 1.  Mount the root filesystem
+zfs create rpool/root -o mountpoint=legacy  # create data set
+mount -t zfs rpool/root /mnt
+
++? is boot encrypted? NO
+   - it could be but non in this case
+     likely not worth it
+
+# 2. UEFI mount boot on /mnt/boot
+mkdir -p /mnt/boot
+# mount /dev/disk/by-label/boot /mnt/boot
+zfs create bpool/boot -o mountpoint=legacy
+mount -t zfs bpool/boot /mnt/boot
+
+# 3. (optional) Enable swap to speed up install.
+# -? how to find swap partition? lsblk -fs --json or by label?
+swapon "/dev/mapper/nvme-HFM128GDJTNG-8310A_CY01N011010501704-part2"
+# swapon swap?  # test once re-created with label
+
+# 4. Generate configuration
+nixos-generate-config --root /mnt
+
+$EDITOR /mnt/etc/nixos/configuration.nix
+
+nixos-install
+
+;; TODO: need to add passphrase on luks key
+;; TODO: leave some free space blocked in zfs
+
+REFERENCES
+- https://nixos.wiki/wiki/NixOS_on_ZFS
+- https://nixos.org/nixos/manual/#sec-installation
+- https://elvishjerricco.github.io/2018/12/06/encrypted-boot-on-zfs-with-nixos.html
+
 Setup test environment to replicate nixos install from OVH rescue CD.
 
 Use qemu to boot into rescuecd distro.
@@ -5,24 +56,6 @@ Use qemu to boot into rescuecd distro.
 
 SUMMARY
 Install nixos on a bare metal system.
-
-TASKS
-- use tmp/ instead of var/
-- get running locally
-- factor out into namespaces
-- add partitioning configuration suitable for laptop
-  -? how does it get configuration?
-    -? auto detect?
-- launch nix installer
-  -? how does it get configuration?
-
-QUESTIONS
-- ? what would final process look like?
-  ssh newbox
-  git clone ... (or scp -r from local box)
-  bin/install
-- ? how does luks password get managed?
-- ? luks key should be generated on device? (is this too slow in vm?)
 
 ARCHITECTURE
 - assumes system is:

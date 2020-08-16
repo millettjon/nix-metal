@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+# Safety goggles.
+set -e
+
+# Change to the project root directory.
+PROJECT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+export PROJECT_HOME
+cd "$PROJECT_HOME"
+
+nix-env -iA nixos.git nixos.emacs-nox
+
+# TODO: fix hardcoding
+# Maybe just edit via tramp?
+# - ? pass in from git on source?
+#git config --global user.email jon@millett.net
+#git config --global user.name "Jonathan Millett"

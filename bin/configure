@@ -17,3 +17,11 @@ mkdir -p .cache
     ZIP="https://github.com/borkdude/babashka/releases/download/v${VERSION}/babashka-${VERSION}-linux-static-amd64.zip"
     curl -sL "${ZIP}" | gunzip | install --mode=0755 /dev/stdin .cache/bb
 }
+
+# Install clj-kondo as a static binary.
+[[ -e .cache/clj-kondo ]] || {
+    echo "Downloading clj-kondo."
+    VERSION="$(curl -sL https://raw.githubusercontent.com/borkdude/clj-kondo/master/resources/CLJ_KONDO_RELEASED_VERSION)"
+    ZIP="https://github.com/borkdude/clj-kondo/releases/download/v${VERSION}/clj-kondo-${VERSION}-linux-static-amd64.zip"
+    curl -sL "${ZIP}" | gunzip | install --mode=0755 /dev/stdin .cache/clj-kondo
+}
