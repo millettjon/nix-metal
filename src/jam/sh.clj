@@ -1,12 +1,12 @@
 (ns jam.sh
   (:require [clojure.string :as str]
-            [clojure.java.io :as io]
-            [clojure.java.shell :as shell]))
+            [clojure.java.shell :as shell]
+            [jam.log :refer [die]]))
 
-(defn die
-  [& args]
-  (println "ERROR: " (pr-str args))
-  (System/exit 1))
+(defn kw->opt
+  "Converts keyword opt into a command line option string."
+  [opt]
+  (str "--" (name opt)))
 
 (defn $
   [& args]

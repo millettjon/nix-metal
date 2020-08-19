@@ -294,18 +294,6 @@
   (fn [{:keys [chain] :as conf}]
     (first chain)))
 
-(defn create-partitions
-  "Creates a partion on each disk in disks according to :part/size and
-  :part/type in conf. Returns a list of the partitions created."
-  [{:keys [disks] :as conf}]
-  (doall
-   (map (fn [disk]
-          (let [id   (disk-by-id disk)
-                size (or (:part/size conf)
-                         (:size conf))
-                type (:part/type conf)]
-            (new-part id (str size "M") type)))
-        disks)))
 
 (defn run-handler
   [{:keys [disks chain setup-fn map-fn combine-fn] :as conf}]
@@ -460,22 +448,6 @@
                        [:zfs/root :luks]]}
    :data {:partitions [[:zfs/data :luks]]}})
 
-;; need to fix multi method dispatch
-[:zfs :root_pool [:root]]
-
-;; ? how to add data sets?
-;; - those need to be:
-;;   - created
-;;   - mounted before install
-
-;; ? how to mount?
-
-;; ? is this better done by fn calls?
-(def profiles
-  {:main {:partitions [[:esp]
-                       [:swap :luks :md]
-                       [:zfs/root :luks]]}
-   :data {:partitions [[:zfs/data :luks]]}})
 
 
 (defn process
