@@ -4,8 +4,8 @@
 (def laptop
   {:name        "venus"
    :type        :local
-   :disk-groups [#_[{:selector {:type :nvme}}
-                  [:efi-system]
+   :disk-groups [[{:selector {:type :nvme}}
+                  [:efi-system {:mount "/boot"}]
                   [:swap [:luks [:raid]]]
                   [:zfs/pool {:name "root_pool"
                               :datasets [{:name "root" :mount "/"}
@@ -14,7 +14,7 @@
                  [{:selector {:type :sd}}
                   [:zfs/pool {:name "data_pool"
                               :datasets [{:name "data" :mount "/data"}]}
-                   #_[:luks]]]]})
+                   [:luks]]]]})
 
 (defn -main
   []

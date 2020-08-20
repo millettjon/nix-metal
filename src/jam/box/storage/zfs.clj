@@ -1,7 +1,8 @@
 (ns jam.box.storage.zfs
   (:require [clojure.string :as str]
             [jam.sh :refer [$ $>]]
-            [jam.box.storage.disk :refer [parse-node create-device]]))
+            [jam.box.storage.util :refer [unmount-tree findmnt]]
+            [jam.box.storage.disk :refer [parse-node create-device add-mount]]))
 
 (defn pools
   "Returns the list of zfs pools."
@@ -10,10 +11,17 @@
     (when-not (empty? pools)
       (str/split-lines pools))))
 
+(defn pool-unmount
+  "Unmounts any mounted filesytems under pool."
+  [pool]
+  (unmount-tree (findmnt "-t" "zfs") (re-pattern (str "^" pool "($|/.+)"))))
+
 (defn pool-destroy
   "Destroys zfs pool pool."
   [pool]
-  ($ "zpool" "destroy" #_ "-f" pool))
+  ;; Note: force unmounting with -f doesn't work.
+  (pool-unmount pool)
+  ($ "zpool" "destroy" #_"-f" pool))
 
 (defn pools-destroy
   "Destroys all zfs pools."
@@ -46,7 +54,9 @@
     [name "mirror"]
     name))
 
-;; Ref: https://openzfs.github.io/openzfs-docs/Getting%20Started/Ubuntu/Ubuntu%2020.04%20Root%20on%20ZFS.html
+;; Ref:
+;; - https://nixos.wiki/wiki/NixOS_on_ZFS
+;; - https://openzfs.github.io/openzfs-docs/Getting%20Started/Ubuntu/Ubuntu%2020.04%20Root%20on%20ZFS.html
 (def zfs-rpool-options
   ["-o" "ashift=12"           ; ok
    "-O" "acltype=posixacl"    ; ok, for journald
@@ -57,20 +67,29 @@
    ])
 
 (defmethod create-device :zfs/pool
-  [node opts]
-  (let [[{:keys [name]} child] (parse-node node)
-        parts (create-device child (assoc opts :type "BF00"))]
+  [node {:keys [install? mounts]:as opts}]
+  (let [[{pool-name :name
+          :keys     [datasets]} child] (parse-node node)
+        parts                          (create-device child (assoc opts :type "BF00"))]
     ($ "zpool" "create"
        zfs-rpool-options
-       (pool name parts)
+       (pool pool-name parts)
        parts)
-    name))
 
-;; TODO create data set
-;; TODO create a reservation data set
-;; TODO mount
+    ;; Add dataset to reserve space to easily recover if zfs runs out of space.
+    ($ "zfs" "create" "-o" "refreservation=1G" "-o" "mountpoint=none" (str pool-name "/reserved"))
 
-#_ [:zfs/pool {:name "root_pool"
-            :datasets [{:name "root" :mount "/"}
-                       {:name "nix" :mount "/nix"}]}
- [:luks]]
+    ;; Create actual datasets.
+    (doseq [{:keys [name mount] :as _dataset} datasets]
+      (let [dataset-name   (str pool-name "/" name)
+            mountpoint-opt (str "mountpoint=" (if mount "legacy" "none"))
+            mount-dir      (if install?
+                             (str "/mnt" mount)
+                             mount)]
+        ($ "zfs" "create" "-o" mountpoint-opt dataset-name)
+        (add-mount opts {:type :zfs
+                         :source dataset-name
+                         :target mount-dir})))
+    pool-name))
+
+;; TODO ? enable compression on zfs partitions?

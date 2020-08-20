@@ -1,5 +1,6 @@
 (ns jam.path
-  (:require [clojure.java.io :as io]))
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]))
 
 (defn symlink?
   [path]
@@ -19,3 +20,7 @@
 (defn basename
   [path]
   (.getName (io/file (str path))))
+
+(defn split
+  [path]
+  (str/split path #"/"))

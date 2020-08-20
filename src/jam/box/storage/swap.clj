@@ -21,5 +21,6 @@
                          :size (/ swap-size (count disks)))
         parts (create-device child opts)]
     (doseq [part parts]
-      ($ "mkswap" "-L" "swap" part))
+      ($ "mkswap" "-L" "swap" part)
+      ($ "swapon" part))
     parts))

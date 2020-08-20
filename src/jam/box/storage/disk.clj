@@ -9,6 +9,10 @@
             [jam.box.storage.udev :as udev]
             #_[clojure.pprint :refer [pprint]]))
 
+(defn add-mount
+  [opts mount]
+  (swap! (:mounts opts) conj mount))
+
 (defn parse-node
   [[_type & args]]
   (let [[args opts]  (if (map? (first args))
@@ -99,7 +103,7 @@
    (stop-all (lsblk [:output-all [:include (str/join "," (vals disk-types))]])))
   ([devices]
    ;; Walk device tree. Stop children first then stop self.
-   (when-let [{:keys [path type children]} (first devices)]
+   (when-let [{:keys [path type children fstype mountpoint] :as _device} (first devices)]
      ;; Process children.
      (stop-all children)
      ;; Process self.
@@ -109,6 +113,10 @@
        (when-let [pool (get (zfs/pools-by-device) (basename (or (readlink path) path)))]
          (zfs/pool-destroy pool))
        (info "stopping path" path)
+       (when mountpoint
+         (case fstype
+           "swap" ($ "swapoff" path)
+           ($ "umount" mountpoint)))
        (case type
          "crypt" ($ "cryptsetup" "luksClose" path)
          "raid1" (do

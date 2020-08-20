@@ -1,7 +1,7 @@
 (ns jam.box.storage.util
   (:require [clojure.string :as str]
             [cheshire.core :as json]
-            [jam.sh :refer [$> kw->opt]]
+            [jam.sh :refer [$ $> kw->opt]]
             [jam.log :refer [die]]))
 
 ;; Getting the model may be useful.
@@ -45,3 +45,37 @@
                  (conj disks disk)))
              []
              disks))))
+
+(defn mount
+  [type source target]
+  ($ "mkdir" "-p" target)
+  ($ "mount" "-t" (name type) source target))
+
+(defn findmnt
+  [& args]
+  (let [cmd          (concat ["findmnt" "--bytes" "--json"] args)
+        file-systems (-> (apply $> cmd)
+                         (json/parse-string true)
+                         :filesystems)]
+    file-systems))
+
+(defn unmount-tree
+  "Walks a findmnt tree and unmounts any mounts matching pattern.
+  Children are unmounted before parents."
+  [nodes pattern]
+  (doseq [{:keys [source
+                  target
+                  children] :as _node} nodes]
+    (when (re-matches pattern source)
+      ;; unmount children
+      (when children
+        (unmount-tree children pattern))
+      ;; unmount self
+      ;; Note:
+      ;; - Use -R since there may be datasets from other zpools
+      ;;   mounted onto this one.
+      ;; - There is no way to unmount a mount that has been shadowed
+      ;;   by a second mount without first unmounting the second
+      ;;   mount.
+      ;; - If all else fails, umount everything: e.g.: umount -t zfs -a
+      ($ "umount" "-R" target))))
