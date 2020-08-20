@@ -1,6 +1,6 @@
 (ns jam.box
-  (:require [jam.box.storage.disk :as disk]
-            [jam.path :as path]
+  (:require [jam.path :as path]
+            [jam.sh :refer [$]]
             [jam.box.storage.util :as util]
             [jam.log :refer [info]]))
 
@@ -34,6 +34,16 @@
             (breadth-first-mounts mount-tree)]
       (util/mount type source target))))
 
+(defn nix-install
+  []
+  ($ "nixos-generate-config" "--root" "/mnt")
+)
+;; edits to configuration.nix
+;;   - boot.supportedFilesystems = [ "zfs" ];
+;;   - networking.hostName
+;; nixos-install
+
+
 ;; TODO validate w/ spec
 (defn build
   [{:keys [disk-groups] :as machine}]
@@ -42,7 +52,7 @@
   ;; across all disk groups so save mounts in an atom
   ;; so that correct mount order can be determined later.
   (let [mounts (atom [])]
-    (doseq [[{:keys [selector] :as _opts}
+    #_(doseq [[{:keys [selector] :as _opts}
              & devices] disk-groups]
       (let [disks (disk/select selector)]
         (info "building disks:" disks)
@@ -55,7 +65,8 @@
                                       :mounts mounts
                                       :install? true}))))
     ;; mounts
-    (prn "mounts" @mounts)
-    (mount-all @mounts)
+    #_(mount-all @mounts)
+
     ;; continue install
+    (nix-install)
     ))
