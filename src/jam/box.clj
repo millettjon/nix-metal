@@ -41,6 +41,7 @@
 ;; edits to configuration.nix
 ;;   - boot.supportedFilesystems = [ "zfs" ];
 ;;   - networking.hostName
+;;   - networking.hostId
 ;; nixos-install
 
 
